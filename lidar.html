@@ -1,0 +1,395 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>2D LiDAR Simulator</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style>
+    html, body { margin:0; height:100%; background:#0f1115; color:#eee; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial;}
+    #ui { position:fixed; left:12px; top:12px; background:#171923; border:1px solid #2d3040; border-radius:10px; padding:12px; box-shadow:0 4px 10px rgba(0,0,0,0.3); }
+    #ui h2 { margin:0 0 8px 0; font-size:16px; }
+    #ui .row { display:flex; align-items:center; gap:8px; margin:6px 0; font-size:13px; }
+    #ui input[type="range"] { width:160px; }
+    #ui button { background:#2b6cb0; color:white; border:none; padding:6px 10px; border-radius:8px; cursor:pointer; }
+    #ui button:hover { opacity:.9; }
+    #help { position:fixed; right:12px; top:12px; background:#171923; border:1px solid #2d3040; border-radius:10px; padding:12px; font-size:13px; max-width:360px;}
+    canvas { display:block; width:100vw; height:100vh; }
+    a { color:#9ae6b4; }
+    .badge { background:#1a202c; border:1px solid #2d3748; padding:2px 6px; border-radius:6px; font-size:12px; }
+    .spacer { flex:1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+
+  <div id="ui">
+    <h2>LiDAR Controls</h2>
+
+    <div class="row">
+      <label>FOV (deg)</label>
+      <input id="fov" type="range" min="10" max="360" value="270"><span id="fovv" class="badge">270</span>
+    </div>
+    <div class="row">
+      <label>Rays</label>
+      <input id="rays" type="range" min="60" max="1440" step="10" value="720"><span id="raysv" class="badge">720</span>
+    </div>
+    <div class="row">
+      <label>Max Range (m)</label>
+      <input id="range" type="range" min="2" max="40" step="1" value="20"><span id="rangev" class="badge">20</span>
+    </div>
+    <div class="row">
+      <label>Noise σ (m)</label>
+      <input id="noise" type="range" min="0" max="0.5" step="0.01" value="0.03"><span id="noisev" class="badge">0.03</span>
+    </div>
+    <div class="row">
+      <label>Mode</label>
+      <select id="mode">
+        <option value="scan">Scan</option>
+        <option value="point">Point Cloud</option>
+        <option value="both" selected>Both</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label>Draw</label>
+      <select id="drawMode">
+        <option value="none" selected>Navigate</option>
+        <option value="segment">Add Segment</option>
+        <option value="clear">Clear All</option>
+      </select>
+    </div>
+
+    <hr style="border:none; border-top:1px solid #2d3040; margin:10px 0"/>
+
+    <div class="row">
+      <b>Random Obstacles</b><span class="spacer"></span>
+      <button id="randomize">Add</button>
+    </div>
+    <div class="row">
+      <label>Count</label>
+      <input id="randCount" type="range" min="1" max="25" step="1" value="8"><span id="randCountV" class="badge">8</span>
+    </div>
+    <div class="row">
+      <label>Shape</label>
+      <select id="randShape">
+        <option value="segments" selected>Segments</option>
+        <option value="boxes">Boxes</option>
+      </select>
+    </div>
+
+    <div class="row" style="gap:6px; margin-top:6px;">
+      <button id="snap">Screenshot</button>
+      <button id="resetPose">Reset Pose</button>
+    </div>
+    <div class="row" style="margin-top:6px;">
+      <a href="https://github.com/aotlacan/lidar-simulator" target="_blank" rel="noopener" style="display:inline-block; background:#2b6cb0; color:#fff; text-decoration:none; padding:6px 10px; border-radius:8px;">Docs on GitHub</a>
+    </div>
+  </div>
+
+  <div id="help">
+    <b>Controls</b><br/>
+    W A S D move. Q E rotate. Hold Shift for faster movement. <br/>
+    In Add Segment mode, click and drag to draw walls. Switch back to Navigate to move the robot. <br/><br/>
+    <b>Random Obstacles</b><br/>
+    Choose count and shape, then press Add. Boxes are axis aligned. Segments are random lines. The scene keeps your existing walls. Use Clear All to reset the world to the bounding box only.
+  </div>
+
+<script>
+(function(){
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let W, H, DPR = Math.max(1, window.devicePixelRatio || 1);
+  function resize(){
+    W = canvas.clientWidth; H = canvas.clientHeight;
+    canvas.width = Math.round(W * DPR);
+    canvas.height = Math.round(H * DPR);
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // UI elements
+  const fovEl = document.getElementById('fov'), fovV = document.getElementById('fovv');
+  const raysEl = document.getElementById('rays'), raysV = document.getElementById('raysv');
+  const rangeEl = document.getElementById('range'), rangeV = document.getElementById('rangev');
+  const noiseEl = document.getElementById('noise'), noiseV = document.getElementById('noisev');
+  const modeEl = document.getElementById('mode');
+  const drawModeEl = document.getElementById('drawMode');
+  const snapBtn = document.getElementById('snap');
+  const resetPoseBtn = document.getElementById('resetPose');
+  const randBtn = document.getElementById('randomize');
+  const randCountEl = document.getElementById('randCount');
+  const randCountV = document.getElementById('randCountV');
+  const randShapeEl = document.getElementById('randShape');
+
+  function syncLabels(){
+    fovV.textContent = fovEl.value;
+    raysV.textContent = raysEl.value;
+    rangeV.textContent = rangeEl.value;
+    noiseV.textContent = noiseEl.value;
+    randCountV.textContent = randCountEl.value;
+  }
+  [fovEl, raysEl, rangeEl, noiseEl, randCountEl].forEach(el=>el.addEventListener('input', syncLabels));
+  syncLabels();
+
+  // World representation
+  const mPerPx = 0.02; // 1 px = 2 cm
+  function pxToM(x, y){ return {x:x*mPerPx, y:y*mPerPx}; }
+  function mToPx(x, y){ return {x:x/mPerPx, y:y/mPerPx}; }
+
+  const segments = [];
+  function addBounds(){
+    const pad = 40; // px
+    const a = pxToM(pad,pad), b = pxToM(W-pad,pad);
+    const c = pxToM(W-pad,H-pad), d = pxToM(pad,H-pad);
+    segments.push({x1:a.x,y1:a.y,x2:b.x,y2:b.y});
+    segments.push({x1:b.x,y1:b.y,x2:c.x,y2:c.y});
+    segments.push({x1:c.x,y1:c.y,x2:d.x,y2:d.y});
+    segments.push({x1:d.x,y1:d.y,x2:a.x,y2:a.y});
+  }
+  addBounds();
+
+  // Robot pose
+  const robot = { x: (W*0.5)*mPerPx, y: (H*0.6)*mPerPx, th: -Math.PI/2 };
+  const speed = { lin: 1.6, ang: 1.8 };
+  const keys = new Set();
+  window.addEventListener('keydown', e=>keys.add(e.key.toLowerCase()));
+  window.addEventListener('keyup', e=>keys.delete(e.key.toLowerCase()));
+
+  // Draw segments with mouse
+  let mouse = {x:0,y:0, down:false};
+  let currentSeg = null;
+  canvas.addEventListener('mousedown', e=>{
+    const dm = drawModeEl.value;
+    if(dm === 'segment'){
+      mouse.down = true;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left, y = e.clientY - rect.top;
+      const p = pxToM(x,y);
+      currentSeg = {x1:p.x, y1:p.y, x2:p.x, y2:p.y};
+    } else if(dm === 'clear'){
+      segments.length = 0;
+      addBounds();
+      drawModeEl.value = 'none';
+    }
+  });
+  canvas.addEventListener('mousemove', e=>{
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    mouse.x = x; mouse.y = y;
+    if(mouse.down && currentSeg){
+      const p = pxToM(x,y);
+      currentSeg.x2 = p.x; currentSeg.y2 = p.y;
+    }
+  });
+  canvas.addEventListener('mouseup', ()=>{
+    if(currentSeg){
+      if(!tooShort(currentSeg)) segments.push(currentSeg);
+      currentSeg = null;
+    }
+    mouse.down = false;
+  });
+
+  // Random obstacles
+  function rand(min, max){ return min + Math.random()*(max-min); }
+  function tooShort(seg){
+    const dx = seg.x2 - seg.x1, dy = seg.y2 - seg.y1;
+    return (dx*dx + dy*dy) < 0.05*0.05; // less than 5 cm
+  }
+
+  function addRandomSegments(count){
+    const padPx = 60;
+    const minM = pxToM(padPx, padPx);
+    const maxM = pxToM(W - padPx, H - padPx);
+    for(let i=0;i<count;i++){
+      const x1 = rand(minM.x, maxM.x);
+      const y1 = rand(minM.y, maxM.y);
+      const len = rand(0.3, 2.2); // meters
+      const ang = rand(0, Math.PI*2);
+      const x2 = x1 + len*Math.cos(ang);
+      const y2 = y1 + len*Math.sin(ang);
+      const seg = {x1,y1,x2,y2};
+      if(!tooShort(seg)) segments.push(seg);
+    }
+  }
+
+  function addRandomBoxes(count){
+    const padPx = 80;
+    const minM = pxToM(padPx, padPx);
+    const maxM = pxToM(W - padPx, H - padPx);
+    for(let i=0;i<count;i++){
+      const cx = rand(minM.x, maxM.x);
+      const cy = rand(minM.y, maxM.y);
+      const w = rand(0.4, 2.0);
+      const h = rand(0.4, 2.0);
+      const x1 = cx - w/2, x2 = cx + w/2;
+      const y1 = cy - h/2, y2 = cy + h/2;
+      // Axis aligned rectangle
+      segments.push({x1:x1,y1:y1,x2:x2,y2:y1});
+      segments.push({x1:x2,y1:y1,x2:x2,y2:y2});
+      segments.push({x1:x2,y1:y2,x2:x1,y2:y2});
+      segments.push({x1:x1,y1:y2,x2:x1,y2:y1});
+    }
+  }
+
+  randBtn.addEventListener('click', ()=>{
+    const n = +randCountEl.value;
+    const shape = randShapeEl.value;
+    if(shape === 'segments') addRandomSegments(n);
+    else addRandomBoxes(n);
+  });
+
+  // LiDAR
+  function raySegIntersect(rx, ry, rdx, rdy, x1,y1,x2,y2){
+    const vx = x2 - x1, vy = y2 - y1;
+    const det = rdx*vy - rdy*vx;
+    if(Math.abs(det) < 1e-9) return null;
+    const dx = x1 - rx, dy = y1 - ry;
+    const t = (dx*vy - dy*vx) / det;
+    const u = (dx*rdy - dy*rdx) / det;
+    if(t >= 0 && u >= 0 && u <= 1){
+      return { t, x: rx + t*rdx, y: ry + t*rdy };
+    }
+    return null;
+  }
+
+  function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+  function gaussNoise(sigma){
+    const u1 = Math.random() || 1e-9, u2 = Math.random();
+    const z0 = Math.sqrt(-2*Math.log(u1)) * Math.cos(2*Math.PI*u2);
+    return z0 * sigma;
+  }
+
+  function scan(){
+    const FOV = (+fovEl.value) * Math.PI/180;
+    const N = +raysEl.value;
+    const R = +rangeEl.value;
+    const sigma = +noiseEl.value;
+
+    const start = robot.th - FOV/2;
+    const pts = [];
+    for(let i=0;i<N;i++){
+      const ang = start + i*(FOV/(N-1));
+      const dx = Math.cos(ang), dy = Math.sin(ang);
+      let best = null;
+      for(const s of segments){
+        const it = raySegIntersect(robot.x, robot.y, dx, dy, s.x1, s.y1, s.x2, s.y2);
+        if(!it) continue;
+        if(it.t <= R && (!best || it.t < best.t)) best = it;
+      }
+      let r = best ? best.t : R;
+      if(sigma > 0) r = clamp(r + gaussNoise(sigma), 0, R);
+      const hit = {x: robot.x + r*dx, y: robot.y + r*dy};
+      pts.push({angle: ang, range: r, hit});
+    }
+    return pts;
+  }
+
+  // Screenshot and pose controls
+  snapBtn.addEventListener('click', ()=>{
+    const a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    a.download = 'lidar_screenshot.png';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+
+  resetPoseBtn.addEventListener('click', ()=>{
+    robot.x = (W*0.5)*mPerPx;
+    robot.y = (H*0.6)*mPerPx;
+    robot.th = -Math.PI/2;
+  });
+
+  // Animation
+  let last = performance.now();
+  function step(ts){
+    const dt = Math.min(0.033, (ts - last)/1000);
+    last = ts;
+
+    // Move robot
+    const fast = keys.has('shift');
+    const lin = speed.lin * (fast ? 2.2 : 1);
+    const ang = speed.ang * (fast ? 1.8 : 1);
+
+    if(drawModeEl.value === 'none'){
+      if(keys.has('w')){ robot.x += Math.cos(robot.th)*lin*dt; robot.y += Math.sin(robot.th)*lin*dt; }
+      if(keys.has('s')){ robot.x -= Math.cos(robot.th)*lin*dt; robot.y -= Math.sin(robot.th)*lin*dt; }
+      if(keys.has('a')){ robot.x += Math.cos(robot.th - Math.PI/2)*lin*dt; robot.y += Math.sin(robot.th - Math.PI/2)*lin*dt; }
+      if(keys.has('d')){ robot.x += Math.cos(robot.th + Math.PI/2)*lin*dt; robot.y += Math.sin(robot.th + Math.PI/2)*lin*dt; }
+      if(keys.has('q')){ robot.th -= ang*dt; }
+      if(keys.has('e')){ robot.th += ang*dt; }
+    }
+
+    // Draw
+    ctx.clearRect(0,0,W,H);
+
+    // Grid
+    ctx.save();
+    ctx.globalAlpha = 0.25;
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = '#223';
+    const gridPx = 50;
+    for(let x=0;x<=W;x+=gridPx){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+    for(let y=0;y<=H;y+=gridPx){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+    ctx.restore();
+
+    // Segments
+    ctx.strokeStyle = '#8aa0ff';
+    ctx.lineWidth = 2;
+    for(const s of segments){
+      const a = mToPx(s.x1,s.y1), b = mToPx(s.x2,s.y2);
+      ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+    }
+    // Preview current drawing
+    if(currentSeg){
+      const a = mToPx(currentSeg.x1,currentSeg.y1), b = mToPx(currentSeg.x2,currentSeg.y2);
+      ctx.strokeStyle = '#9ae6b4';
+      ctx.setLineDash([6,6]);
+      ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Robot
+    const rp = mToPx(robot.x, robot.y);
+    ctx.fillStyle = '#ffd166';
+    ctx.beginPath(); ctx.arc(rp.x, rp.y, 10, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#ffd166';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(rp.x, rp.y);
+    ctx.lineTo(rp.x + 20*Math.cos(robot.th), rp.y + 20*Math.sin(robot.th));
+    ctx.stroke();
+
+    // Scan
+    const data = scan();
+    const mode = modeEl.value;
+
+    if(mode === 'scan' || mode === 'both'){
+      ctx.strokeStyle = 'rgba(0,255,200,0.25)';
+      ctx.lineWidth = 1.5;
+      for(const d of data){
+        const hp = mToPx(d.hit.x, d.hit.y);
+        ctx.beginPath(); ctx.moveTo(rp.x, rp.y); ctx.lineTo(hp.x, hp.y); ctx.stroke();
+      }
+    }
+    if(mode === 'point' || mode === 'both'){
+      ctx.fillStyle = 'rgba(0,255,200,0.9)';
+      for(const d of data){
+        const hp = mToPx(d.hit.x, d.hit.y);
+        ctx.beginPath(); ctx.arc(hp.x, hp.y, 2.2, 0, Math.PI*2); ctx.fill();
+      }
+    }
+
+    // HUD
+    ctx.fillStyle = '#cbd5e0';
+    ctx.font = '12px system-ui';
+    ctx.fillText(`Pose: x=${robot.x.toFixed(2)} m  y=${robot.y.toFixed(2)} m  th=${(robot.th*180/Math.PI).toFixed(1)}°`, 12, H-12);
+
+    requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+})();
+</script>
+</body>
+</html>
